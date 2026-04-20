@@ -1,0 +1,385 @@
+#Load libraries
+library(DESeq2) 
+library(fgsea)
+library(corrplot)
+library(polycor)
+library(ggbiplot)
+library(ggpubr)
+library(pheatmap)
+library(data.table)
+library(gridExtra)
+library(grid)
+library(lattice)
+library(mgsub)
+library(dplyr)
+
+# 0. Global Variable configuration
+#Define default variable to avoide a part of magic number in the code
+CLINICAL_DATA_NUMERICAL_SELECTION = c('AGE', 'HGHT', 'WGHT', 'BMI', 'TRISCHD')
+CLINICAL_DATA_FACTORIAL_SELECTION = c('COHORT', 'DTHHRDY')
+CLINICAL_DATA_BIOLOGICAL_SELECTION = c('AGE', 'HGHT', 'WGHT', 'BMI')
+RANGE_SELECTION = c('AGE_RANGE','BMI_RANGE')
+CLINICAL_DATA_TECHNICAL_SELECTION =  c('COHORT', 'DTHHRDY', 'TRISCHD')
+GGPLOT_GRID_ROW_NUMBER = 2
+GGPLOT_GRID_COL_NUMBER = 2
+DEFAULT_P_VALUE = 0.05
+CLUSTER_NUMEROTATION = 0:63
+
+# 1. Exploration of clinical variables
+
+#loading data
+clinical_data <- read.csv("clinical-data.tsv", sep = "\t", stringsAsFactors = T, row.names = 1)
+morphological_counts <- read.csv("morphological-counts.tsv", sep = "\t", stringsAsFactors = T, row.names = 1)
+RNA_counts_and_descrption <- read.csv("RNA-read-counts.tsv", sep = "\t", stringsAsFactors = T, row.names = 1) 
+clinical_data_save = clinical_data
+
+#setting categorical variables as factors 
+clinical_data$SEX <- as.factor(clinical_data$SEX)
+clinical_data$DTHHRDY <- as.factor(clinical_data$DTHHRDY)
+
+# 1.1 Assess distribution of data
+# 1.1.1 Numerical data
+clinical_data_numerical = subset(clinical_data, select = CLINICAL_DATA_NUMERICAL_SELECTION)
+
+plot_list = vector(mode = 'list', length = length(clinical_data_numerical))
+plot_count = 1
+#Draw density plot for each numerical variable
+for(clinical_variable in colnames(clinical_data_numerical)){
+    plot_list[[plot_count]] = ggplot(clinical_data_numerical, aes_string(clinical_variable)) + geom_histogram(bins = 30) +
+    geom_density()
+    plot_count = plot_count + 1
+}
+#cowplot::plot_grid all to display a grid of ggplot
+cowplot::plot_grid(plotlist = plot_list, nrow = GGPLOT_GRID_ROW_NUMBER )
+
+# 1.1.2 Factorial variables
+clinical_data_factorial = subset(clinical_data, select = CLINICAL_DATA_FACTORIAL_SELECTION)
+
+plot_list = vector(mode = 'list', length = length(clinical_data_factorial))
+plot_count = 1
+#Draw barplot for each categorical variable
+for(clinical_variable in colnames(clinical_data_factorial)){
+    plot_list[[plot_count]] = ggplot(clinical_data_factorial, aes_string(clinical_variable)) + geom_bar()
+    plot_count = plot_count + 1
+}
+cowplot::plot_grid(plotlist = plot_list, ncol = GGPLOT_GRID_ROW_NUMBER )
+
+# 1.2 Correlation between variables
+
+# 1.2.1 Correlation matrix
+# Computing the correlation matrix for numerical variables
+#age, hght, wght, bmi, TRISCHD = numerical variables
+
+clinical_data_numerical_correlation <- cor(clinical_data_numerical)
+
+options(warn=-1)
+
+# Computing the correlation matrix for categorical variables
+#COHORT, DTHHRDY, SMPTHNTS = categorical variables
+
+mixed_variables = data.frame(row.names = CLINICAL_DATA_NUMERICAL_SELECTION)
+
+for(factorial in CLINICAL_DATA_FACTORIAL_SELECTION){
+    for(numerical in CLINICAL_DATA_NUMERICAL_SELECTION){
+        # We used the polyserial function to compute the correlation between a categorical and a numerical variable
+        mixed_variables[numerical, factorial]  = polyserial(clinical_data[,numerical], clinical_data[,factorial]) 
+    }
+}
+# We used the polychor function to compute the correlation between two categorical variables
+mixed_variables['DTHHRDY', 'COHORT'] = polychor(clinical_data$DTHHRDY,clinical_data$COHORT) 
+mixed_variables['COHORT', 'DTHHRDY'] = polychor(clinical_data$COHORT,clinical_data$DTHHRDY)
+mixed_variables['COHORT', 'COHORT'] = 1
+mixed_variables['DTHHRDY', 'DTHHRDY'] = 1
+
+#binding numerical and factorial variables in one corelation matrix to display a corrplot
+clinical_correlation <- cbind(clinical_data_numerical_correlation, mixed_variables[CLINICAL_DATA_NUMERICAL_SELECTION,])
+clinical_correlation <- rbind(clinical_correlation, t(mixed_variables))
+corrplot(as.matrix(clinical_correlation),method = "color", type = "upper", order="hclust", tl.col = "black", tl.cex = .8,
+         addCoef.col = 'red', number.digits = 4, title = "Correlation between categoric and numeric clinical variables",
+         mar=c(0,0,1,0) )
+
+options(warn=0)
+
+# 1.2.2 PCA of numerical variables
+#creation of a dataframe containing all the required data and correctly transformed to obtain the desired pca
+#treat Hardy's scale as numerical
+clinical_data_pca_prepare = subset(clinical_data, select = c(CLINICAL_DATA_NUMERICAL_SELECTION, 'DTHHRDY'))
+clinical_data_pca_prepare$DTHHRDY = as.integer(as.character(clinical_data_pca_prepare$DTHHRDY))
+#consideration of 0 as the last category of the  Hardy scale and  replacement of it with 5
+clinical_data_pca_prepare[clinical_data_pca_prepare$DTHHRDY == 0, "DTHHRDY"] = 5
+#création de différentes tranches d'age à partir des ages de clinical_data, choix:(<45, 45<<56, >55)
+age_range = mapply((function(age)if(age < 45)"age < 45" else if(age < 56)"45< age <56"else "age > 55"), clinical_data$AGE)
+
+clinical_data_pca <- prcomp(clinical_data_pca_prepare, scale = TRUE)
+ggbiplot(clinical_data_pca, groups = age_range, ellipse = TRUE, var.scale = 1, point.size= 5, varname.size= 5) + 
+    geom_point(size=5, aes(colour=age_range))+  
+    ggtitle("all clinical variable pca") + 
+    theme_bw(base_size = 20)
+
+
+# 1.2.3 correlation between technical variables
+ggplot(data = clinical_data, mapping = aes(x =DTHHRDY, y=TRISCHD) ) + 
+    geom_point(aes(color = COHORT), size=3) +
+    theme_bw(base_size = 20)
+
+
+# 1.3 Confounding effects
+#compute a kruskal or wilcoxon test based on the number of factor levels (ex: DTHHRDY => 5 levels => kruskal)
+compute_wilcox_or_kruskal = function(values_vectors){
+    if(length(values_vectors) == 2 && (class(values_vectors[[1]]) != 'factor')){
+        return((wilcox.test(values_vectors[[1]], values_vectors[[2]])))
+    }
+    else{
+        return((kruskal.test(values_vectors)))
+    }
+}
+
+#returns a leveling of a factorial variable or not
+levels_not_factor = function(x){
+    return(if(class(x) == 'factor') levels(x) else levels(as.factor(x)))
+}
+           
+#generate custom kruskal or wilcoxon plot
+wilcox_kruskal_wilcox_ggplot <- function(x_name, y_name, p_value, data_frame){
+    ggplot(data_frame, aes_string(x = x_name, y = y_name)) + 
+        geom_boxplot(aes_string(color = x_name)) +
+        ggtitle(paste("p-value : ", p_value)) +
+        theme(plot.title = element_text(colour = if(p_value <= 0.001) "red" else "black"))
+}
+
+#Allows to transform the result of kruskal or wilcoxon into a sentence. This will allow for nice display in the latex pdf. 
+wilcox_or_kruskal_result_to_string = function(result){
+    return(textGrob(mgsub::mgsub(paste(capture.output(print(result)), collapse = ""),c(",",":"),c(",\n",":\n"))))
+}                               
+#returns the tests (kruskal/wilcoxon) of a list of variables as a function of another list of variables, 
+#the return is a list of the result of the test followed by the plot at the next index.
+wilcox_or_kruskal_data_frame_to_result_list<-function(selection1, selection2, data_frame){
+    ggplot_list = vector(mode = 'list', length = length(selection2)*2)
+    ggcount = 1
+    for(row in selection1){
+        for(column in selection2){
+            if(row != column){
+                wilcox_kruskal_vector = vector('list', length = 2)
+                count_wilcox_kruskal_param = 1
+                #Creation of a vector for each level of the current factor variable. If the level match with an id 
+                #(ex: id1 is of Postmortem death), the value of the second variable will be added to the vector. 
+                #This set of vectors is used for the calculation of the test.
+                for(level in levels_not_factor(data_frame[,row])){
+                    wilcox_kruskal_vector[[count_wilcox_kruskal_param]] = data_frame[data_frame[,row]==level,column]
+                    count_wilcox_kruskal_param = count_wilcox_kruskal_param +1 
+                }
+                wilcox_or_kruskal_result = compute_wilcox_or_kruskal(wilcox_kruskal_vector)
+                ggplot_list[[ggcount]] = wilcox_or_kruskal_result_to_string(wilcox_or_kruskal_result)
+                ggplot_list[[ggcount+1]] = wilcox_kruskal_wilcox_ggplot(row, column, wilcox_or_kruskal_result$p.value,
+                                                               data_frame[c(row, column)])
+                ggcount = ggcount +2
+            }
+        }
+    }
+    return(ggplot_list)
+}
+
+
+# Visualization for cohort and hardy scale
+plot_list=wilcox_or_kruskal_data_frame_to_result_list(c('COHORT', 'DTHHRDY'), CLINICAL_DATA_BIOLOGICAL_SELECTION, clinical_data)
+#Allows a nice grid display in the latex pdf.
+do.call("grid.arrange", c(plot_list, ncol=GGPLOT_GRID_COL_NUMBER*2))
+
+# Visulization for ischemic time
+#generate custom correlation plot
+correlation_to_ggplot = function(data_frame, row, column,correlation, p_value){
+    ggplot(data_frame, aes_string(x= row, y = column)) +
+    geom_point( size=2) +
+    ggtitle(paste("corr = ",round(x=correlation,5),"   p-value = ",signif(x= p_value,5))) +
+    theme_bw() +
+    theme(plot.title = element_text(colour = if(p_value <= 0.001) "red" else "black")) %>% return()
+}
+#returns the correlation of a list of variables as a function of another list of variables, 
+#return a grid of ggplot
+correlation_data_frame_result_funtion = function(selection1, selection2, data_frame){
+    ggplot_list = vector(mode = 'list', length = length(selection2))    
+    ggcount = 1
+    for(row in selection1){
+        for(column in selection2){
+            if(row != column){
+                correlation_result = cor(data_frame[,row],data_frame[,column])
+                correlation_p_value = cor.test(data_frame[,row],data_frame[,column])$p.value
+                ggplot_list[[ggcount]] <- correlation_to_ggplot(data_frame[c(row, column)], 
+                                                                row, column, correlation_result, correlation_p_value)
+                ggcount = ggcount +1
+            }
+        }
+    }
+    grid_plot <<- cowplot::plot_grid(plotlist = ggplot_list, nrow = GGPLOT_GRID_ROW_NUMBER , ncol = GGPLOT_GRID_COL_NUMBER)
+    return(grid_plot)
+}
+
+options(repr.plot.width=10, repr.plot.height=10)
+correlation_data_frame_result_funtion(c('TRISCHD'), CLINICAL_DATA_NUMERICAL_SELECTION, clinical_data)
+
+
+# 2. Association between clinical data and morphology
+log10_default_pValue = log10(DEFAULT_P_VALUE)
+clinical_morphological = merge(x= clinical_data, y = morphological_counts, by = "row.names")
+
+#compute -log10(p_value) + log10_default_pValue (if == 0 : p-value equals 0.05, if >0 : significant, other: non significant)
+#correlations for numerical variable of the clinical data set as a function of the clusters counts
+clinical_numerical_morphological_correlation_plot_matrix = function(clinical_variables_name){    
+    p_value_data_frame = data.frame(row.names = colnames(morphological_counts))
+    for (cluster in colnames(morphological_counts)){
+        for(clinical_variables in clinical_variables_name){
+            p_value = cor.test(clinical_morphological[,clinical_variables], clinical_morphological[,cluster])$p.value
+            p_value_data_frame[cluster, clinical_variables] = -log10(p_value) + log10_default_pValue
+        }
+    }
+    return(p_value_data_frame)
+}
+
+morphological_biological_numerical_pValue_data_frame = clinical_numerical_morphological_correlation_plot_matrix(
+    CLINICAL_DATA_NUMERICAL_SELECTION[CLINICAL_DATA_NUMERICAL_SELECTION %in% CLINICAL_DATA_BIOLOGICAL_SELECTION])
+morphological_technical_numerical_pValue_data_frame = clinical_numerical_morphological_correlation_plot_matrix(
+    CLINICAL_DATA_NUMERICAL_SELECTION[CLINICAL_DATA_NUMERICAL_SELECTION %in% CLINICAL_DATA_TECHNICAL_SELECTION])
+
+BMI_to_category <- function(BMI) {
+  if (BMI < 18.5){BMI_category = "underweight"}
+  else if (BMI < 25){BMI_category = "normal"}
+  else if (BMI < 30){BMI_category = "overweight"}
+  else{BMI_category = "obesity"}
+  return(BMI_category)
+}
+
+clinical_data_factorial["AGE_RANGE"] = as.factor((clinical_data$AGE %/% 10)*10)
+clinical_data_factorial["BMI_RANGE"] = as.factor(mapply((BMI_to_category),clinical_data$BMI))
+categorial_morphological = merge(x= clinical_data_factorial, y = morphological_counts, by = "row.names")[-1] 
+categorial_morphological$COHORT = as.factor(categorial_morphological$COHORT)
+categorial_morphological$DTHHRDY = as.factor(categorial_morphological$DTHHRDY)
+#compute -log10(p_value) + log10_default_pValue wilcokon/kruskal factorial variable of the clinical data set 
+#as a function of the clusters counts
+clinical_wilcox_krustal_plot_matrix = function(clinical_variables_name){
+    p_value_data_frame = data.frame(row.names = colnames(morphological_counts))
+    for(clinical in clinical_variables_name){
+        for(cluster in colnames(morphological_counts)){
+            wilcox_krustal_param_vector = vector('list', length = 2)
+            count_wilcox_krustal_param = 1
+            #iterates through all levels of a factor variable in a manner similar to
+            #the wilcox_or_kruskal_data_frame_to_result_list function
+            for(level in levels(categorial_morphological[,clinical])){
+                wilcox_krustal_param_vector[[count_wilcox_krustal_param]] = 
+                categorial_morphological[categorial_morphological[,clinical] == level,cluster]
+                count_wilcox_krustal_param = count_wilcox_krustal_param +1 
+            }
+            categorial_morphological_p_value = compute_wilcox_or_kruskal(wilcox_krustal_param_vector)$p.value
+            p_value_data_frame[cluster, clinical] = -log10(categorial_morphological_p_value) + log10_default_pValue
+        }
+    }
+    return(p_value_data_frame)
+}
+
+morphological_biological_categorial_pValue_data_frame = clinical_wilcox_krustal_plot_matrix(
+    c(CLINICAL_DATA_FACTORIAL_SELECTION[CLINICAL_DATA_FACTORIAL_SELECTION %in% CLINICAL_DATA_BIOLOGICAL_SELECTION],
+      RANGE_SELECTION))
+morphological_technical_categorial_pValue_data_frame = clinical_wilcox_krustal_plot_matrix(
+    CLINICAL_DATA_FACTORIAL_SELECTION[CLINICAL_DATA_FACTORIAL_SELECTION %in% CLINICAL_DATA_TECHNICAL_SELECTION])
+
+
+
+# 2.1. Association between clinical variables and morphological cluster counts
+
+#Heatmap 
+
+#combines the p-values of the "numerical-cluster" correlations and the kruskal/wilcoxon "factorial-cluster" p-values for
+#the biological clinical variables
+morphological_biological_pValue_data_frame = merge(morphological_biological_numerical_pValue_data_frame,
+                                                   morphological_biological_categorial_pValue_data_frame, by = 'row.names')
+rownames(morphological_biological_pValue_data_frame) = CLUSTER_NUMEROTATION
+
+#Creation of heatmap of -log10(p_value) + log10_default_pValue for biological clinical variables
+pheatmap(morphological_biological_pValue_data_frame[-1], cluster_cols = FALSE, display_numbers = TRUE, 
+         legend_breaks = c(-1, 0, 2.5), legend_labels = c("-1 not significant ", " 0 limit (0.05 p-value)", " 2.5 significant"),
+         main = "Heatmap of morphological over biological variables",
+         color = c('#5fdaf8','#ffebf7','#fe7777'), breaks = c(-2,0,2.5,4),  fontsize = 15)
+
+#Initialization of the dataframe which will be used to retain the DESeq2 confounders for each cluster.
+clinical_cluster_confounded = data.frame(row.names = colnames(morphological_counts),'row_names' = 
+                                         colnames(morphological_counts))
+#Allows you to correctly fill in the data.fame mentioned above from a DESeq2 result.
+store_in_clinical_cluster_confounded = function(res, confounder){
+    clinical_cluster_confounded[confounder] <<- FALSE
+    for(cluster in rownames(res)){
+        clinical_cluster_confounded[cluster, confounder] <<- TRUE
+    }
+}
+
+
+#print and plot the DESeq2 results for the 64 clusters based on a clinical variable. The results are filtered to keep only the 
+#significant ones (<0.05). is_more_than_two_factorial is used in particular for DTHHRDY which requires a  different calculation.
+DESeq_plot_from_matrix <- function(design_, x_, intgroup_, is_more_than_two_factorial = FALSE){
+    dds <- suppressMessages(DESeqDataSetFromMatrix(
+        countData = translated_morphological_counts, colData = clinical_data, design = design_))
+    dds <- suppressMessages(if(is_more_than_two_factorial) DESeq(dds, test = "LRT", reduced = ~1) else DESeq(dds))
+    res <- results(dds)
+    res <- na.omit(res)
+    res <- res[res$padj <= 0.05,]
+    res <- res[order(res$padj),]
+
+    fwrite(as.data.frame(res), paste("Q2.1_DESeq2_", toString(design_), ".csv"), row.names = T)
+    print(data.frame(row.names = rownames(res),"log2FoldChange" = res$log2FoldChange,  "padj" = res$padj) %>% head())
+    #extract the best cluster number from the structure of DESeq2 results
+#     gene_best_p_value = as.numeric( substring(row.names(res)[1], 22))+1
+#     print(ggplot(plotCounts(dds, gene=gene_best_p_value, intgroup=intgroup_,returnData=T),aes(x=x_, y= count))+
+#           geom_point()+
+#           xlab(intgroup_) + 
+#           ylab(row.names(res)[1]))
+    return(res)
+}
+
+
+#Age 
+options(repr.plot.width=3, repr.plot.height=3)
+noprint = DESeq_plot_from_matrix(~ AGE,clinical_data$AGE, "AGE")
+
+#Height
+DESeq_plot_from_matrix(~ HGHT,clinical_data$HGHT, "HGHT") %>% store_in_clinical_cluster_confounded(confounder = 'HGHT')
+
+#Weight
+noprint = DESeq_plot_from_matrix(~ WGHT,clinical_data$WGHT, "WGHT")
+
+
+# 2.2. Association between technical variables and morphological cluster counts
+# Heatmap
+#combines the p-values of the "numerical-cluster" correlations and the kruskal/wilcoxon "factorial-cluster" p-values for
+#the technical clinical variables
+options(repr.plot.width=17, repr.plot.height=17)
+morphological_technical_pValue_data_frame = merge(morphological_technical_numerical_pValue_data_frame,
+                                                   morphological_technical_categorial_pValue_data_frame, by = 'row.names')
+rownames(morphological_technical_pValue_data_frame) = CLUSTER_NUMEROTATION
+
+#Creation of heatmap of -log10(p_value) + log10_default_pValue for technical clinical variables
+pheatmap(morphological_technical_pValue_data_frame[-1], cluster_cols = FALSE, display_numbers = TRUE, 
+         legend_breaks = c(0, 5, 10),
+         legend_labels = c(" 0 limit (0.05 p-value)", " 5 significant", " 10 very significant"),
+         main = "Heatmap of morphological over technical variables",
+         color = c('#5fdaf8','#ffebf7','#fe7777'), breaks = c(-5,0,5, 10),  fontsize = 15)
+
+# Hardy scale
+options(repr.plot.width=3, repr.plot.height=3)
+DESeq_plot_from_matrix(~ DTHHRDY,clinical_data$DTHHRDY, "DTHHRDY", TRUE) %>% 
+store_in_clinical_cluster_confounded(confounder = 'DTHHRDY')
+
+# Cohort
+DESeq_plot_from_matrix(~ COHORT,clinical_data$COHORT, "COHORT") %>% store_in_clinical_cluster_confounded(confounder = 'COHORT')
+
+#Ischemic time
+DESeq_plot_from_matrix(~ TRISCHD,clinical_data$TRISCHD, "TRISCHD")%>%store_in_clinical_cluster_confounded(confounder ='TRISCHD')
+
+
+# 2.3. Adjustement for confounding technical variables
+# Age and confounders
+DESeq_plot_from_matrix(~ COHORT + TRISCHD + DTHHRDY + AGE,clinical_data$AGE, "AGE") %>% 
+store_in_clinical_cluster_confounded(confounder = 'AGE')
+
+# Weight and confounders
+DESeq_plot_from_matrix(~ DTHHRDY + WGHT,clinical_data$WGHT, "WGHT") %>%store_in_clinical_cluster_confounded(confounder = 'WGHT')
+
+
+#  3. Association between morphology and gene expression
